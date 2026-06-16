@@ -1,0 +1,798 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { ChevronLeft, ChevronRight, Plus, X, Trash2, CalendarDays, ListChecks, Flame, Check } from 'lucide-react';
+
+/* ---------------------------------------------------------------- */
+/* constants                                                          */
+/* ---------------------------------------------------------------- */
+
+const STORAGE_KEY = 'planner-data';
+const DEFAULT_DATA = { events: [], tasks: [], habits: [], habitChecks: {} };
+
+const CATEGORIES = [
+  { id: 'work', label: 'Work', color: '#6B8CAE' },
+  { id: 'personal', label: 'Personal', color: '#9B8AC4' },
+  { id: 'health', label: 'Health', color: '#D9695A' },
+  { id: 'other', label: 'Other', color: '#E8A33D' },
+];
+
+const PRIORITIES = [
+  { id: 'high', label: 'High', color: '#D9695A' },
+  { id: 'medium', label: 'Medium', color: '#E8A33D' },
+  { id: 'low', label: 'Low', color: '#6B8CAE' },
+];
+
+const RANGE_START_MIN = 5 * 60;
+const RANGE_END_MIN = 24 * 60;
+const PX_PER_MIN = 64 / 60;
+const GRID_HEIGHT = (RANGE_END_MIN - RANGE_START_MIN) * PX_PER_MIN;
+
+const HOURS = [];
+for (let h = 5; h <= 23; h++) HOURS.push(h);
+
+const WEEKDAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
+/* ---------------------------------------------------------------- */
+/* helpers                                                            */
+/* ---------------------------------------------------------------- */
+
+function pad2(n) { return n.toString().padStart(2, '0'); }
+
+function formatDateKey(d) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function parseDateKey(key) {
+  const [y, m, d] = key.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function addDays(d, n) {
+  const r = new Date(d);
+  r.setDate(r.getDate() + n);
+  return r;
+}
+
+function todayKey() { return formatDateKey(new Date()); }
+function isToday(key) { return key === todayKey(); }
+
+function formatDisplayDate(key) {
+  const d = parseDateKey(key);
+  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+function formatYear(key) { return parseDateKey(key).getFullYear(); }
+
+function hour12Label(hour24) {
+  const period = hour24 >= 12 ? 'PM' : 'AM';
+  let h = hour24 % 12;
+  if (h === 0) h = 12;
+  return `${h} ${period}`;
+}
+
+function minutesToLabel(min) {
+  const h24 = Math.floor(min / 60) % 24;
+  const m = min % 60;
+  const period = h24 >= 12 ? 'PM' : 'AM';
+  let h = h24 % 12;
+  if (h === 0) h = 12;
+  return `${h}:${pad2(m)} ${period}`;
+}
+
+function minutesToParts(min) {
+  const h24 = Math.floor(min / 60) % 24;
+  const m = min % 60;
+  const period = h24 >= 12 ? 'PM' : 'AM';
+  let h = h24 % 12;
+  if (h === 0) h = 12;
+  return { h, m, period };
+}
+
+function partsToMinutes({ h, m, period }) {
+  let h24 = h % 12;
+  if (period === 'PM') h24 += 12;
+  return h24 * 60 + m;
+}
+
+function genId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+function nowMinutes() {
+  const d = new Date();
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+/* ---------------------------------------------------------------- */
+/* styles                                                             */
+/* ---------------------------------------------------------------- */
+
+const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,500&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+
+.dp-root, .dp-root * , .dp-root *::before, .dp-root *::after { box-sizing: border-box; }
+.dp-root h1, .dp-root h2, .dp-root h3, .dp-root p, .dp-root ul { margin: 0; padding: 0; }
+.dp-root button { font-family: inherit; }
+.dp-root input, .dp-root select, .dp-root textarea { font-family: inherit; }
+
+.dp-root {
+  --bg: #14171C;
+  --surface: #1B1F26;
+  --surface-2: #21262E;
+  --line: #2A3038;
+  --text: #E8E6E0;
+  --text-muted: #848C99;
+  --amber: #E8A33D;
+  --coral: #D9695A;
+  --teal: #5EA89A;
+  --slate: #6B8CAE;
+  --violet: #9B8AC4;
+  --safe: env(safe-area-inset-bottom, 0px);
+  font-family: 'IBM Plex Sans', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  -webkit-font-smoothing: antialiased;
+}
+
+.dp-root button:focus-visible,
+.dp-root input:focus-visible,
+.dp-root select:focus-visible,
+.dp-root textarea:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+.dp-loading { align-items: center; justify-content: center; }
+.dp-spinner { width: 28px; height: 28px; border-radius: 50%; border: 2.5px solid var(--line); border-top-color: var(--amber); animation: dp-spin .7s linear infinite; }
+@keyframes dp-spin { to { transform: rotate(360deg); } }
+
+/* header */
+.dp-header { padding: 18px 18px 0; flex-shrink: 0; }
+.dp-header-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+.dp-wordmark { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.18em; color: var(--text-muted); }
+.dp-clock { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--amber); letter-spacing: 0.04em; }
+.dp-date-nav { display: flex; align-items: center; justify-content: center; gap: 18px; }
+.dp-date-display { text-align: center; min-width: 160px; }
+.dp-date-main { display: block; font-family: 'Fraunces', serif; font-size: 26px; font-weight: 600; line-height: 1.1; }
+.dp-date-year { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--text-muted); letter-spacing: 0.08em; }
+.dp-icon-btn { background: none; border: none; color: var(--text-muted); width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; border-radius: 50%; cursor: pointer; flex-shrink: 0; }
+.dp-icon-btn:hover { background: var(--surface-2); color: var(--text); }
+.dp-today-pill { display: block; margin: 10px auto 0; background: transparent; border: 1px solid var(--line); color: var(--amber); font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.05em; padding: 5px 14px; border-radius: 999px; cursor: pointer; }
+
+/* tabs */
+.dp-tabs { display: flex; gap: 4px; padding: 16px 18px 0; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.dp-tab { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; background: none; border: none; color: var(--text-muted); font-size: 13px; font-weight: 500; padding: 10px 0 12px; cursor: pointer; border-bottom: 2px solid transparent; transition: color .15s, border-color .15s; }
+.dp-tab-active { color: var(--text); border-bottom-color: var(--amber); }
+
+/* content */
+.dp-content { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 18px 18px calc(110px + var(--safe)); }
+.dp-empty-hint { color: var(--text-muted); font-size: 14px; line-height: 1.5; padding: 24px 4px; }
+
+/* schedule */
+.dp-grid-wrap { display: flex; position: relative; }
+.dp-hour-gutter { width: 54px; position: relative; flex-shrink: 0; }
+.dp-hour-label { position: absolute; right: 10px; transform: translateY(-50%); font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.dp-grid { position: relative; flex: 1; border-left: 1px solid var(--line); cursor: pointer; }
+.dp-hour-line { position: absolute; left: 0; right: 0; height: 1px; background: var(--line); }
+.dp-now-line { position: absolute; left: 0; right: 0; height: 0; border-top: 1.5px dashed var(--amber); z-index: 5; pointer-events: none; }
+.dp-now-dot { position: absolute; left: -4px; top: -4px; width: 8px; height: 8px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 4px rgba(232,163,61,0.22); }
+.dp-now-time { position: absolute; left: 10px; top: -9px; font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--amber); background: var(--bg); padding: 0 4px; }
+.dp-event-block { position: absolute; left: 8px; right: 8px; border-left: 3px solid; border-top: none; border-right: none; border-bottom: none; border-radius: 8px; text-align: left; padding: 6px 10px; cursor: pointer; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.dp-event-title { font-size: 13px; font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dp-event-time { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: var(--text-muted); }
+
+/* fab */
+.dp-fab { position: fixed; bottom: calc(24px + var(--safe)); right: 24px; width: 56px; height: 56px; border-radius: 50%; background: var(--amber); color: #181208; border: none; display: flex; align-items: center; justify-content: center; box-shadow: 0 8px 24px rgba(232,163,61,0.35); cursor: pointer; z-index: 20; }
+.dp-fab:active { transform: scale(0.94); }
+
+/* tasks */
+.dp-task-section { margin-bottom: 22px; }
+.dp-task-section-title { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; margin: 0 0 8px; }
+.dp-task-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.dp-task-row { display: flex; align-items: center; gap: 4px; background: var(--surface); border-radius: 10px; }
+.dp-task-dimmed { opacity: 0.55; }
+.dp-task-check { width: 26px; height: 26px; flex-shrink: 0; border-radius: 50%; border: 1.5px solid var(--line); background: none; display: flex; align-items: center; justify-content: center; color: var(--teal); cursor: pointer; margin-left: 8px; }
+.dp-task-check-done { background: var(--teal); border-color: var(--teal); color: var(--bg); }
+.dp-task-body { flex: 1; background: none; border: none; text-align: left; padding: 10px 10px 10px 4px; cursor: pointer; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dp-task-title { font-size: 14px; color: var(--text); }
+.dp-task-title-done { text-decoration: line-through; color: var(--text-muted); }
+.dp-task-meta { display: flex; align-items: center; gap: 8px; }
+.dp-priority-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.dp-task-due { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-muted); }
+
+/* habits */
+.dp-habit-card { background: var(--surface); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+.dp-habit-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+.dp-habit-name-wrap { display: flex; flex-direction: column; gap: 4px; }
+.dp-habit-name { font-family: 'Fraunces', serif; font-size: 17px; font-weight: 600; }
+.dp-habit-streak { display: flex; align-items: center; gap: 4px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--amber); }
+.dp-habit-delete { color: var(--text-muted); }
+.dp-habit-grid { display: flex; gap: 6px; justify-content: space-between; }
+.dp-habit-day { flex: 1; aspect-ratio: 1; max-width: 38px; border-radius: 9px; border: 1.5px solid var(--line); background: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; color: var(--teal); cursor: pointer; }
+.dp-habit-day-checked { background: rgba(94,168,154,0.18); border-color: var(--teal); }
+.dp-habit-day-today { box-shadow: 0 0 0 1.5px var(--amber); }
+.dp-habit-day-letter { font-family: 'IBM Plex Mono', monospace; font-size: 9px; color: var(--text-muted); }
+.dp-reset-link { display: block; margin: 24px auto 0; background: none; border: none; color: var(--text-muted); font-size: 12px; text-decoration: underline; cursor: pointer; }
+
+/* bottom sheet */
+.dp-sheet-backdrop { position: fixed; inset: 0; background: rgba(8,9,11,0.6); display: flex; align-items: flex-end; z-index: 50; }
+.dp-sheet { width: 100%; max-height: 86vh; overflow-y: auto; background: var(--surface); border-radius: 20px 20px 0 0; padding: 10px 18px calc(24px + var(--safe)); animation: dp-sheet-up .22s ease-out; }
+@keyframes dp-sheet-up { from { transform: translateY(24px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.dp-sheet-handle { width: 36px; height: 4px; background: var(--line); border-radius: 2px; margin: 4px auto 14px; }
+.dp-form-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+.dp-form-header h3 { font-family: 'Fraunces', serif; font-size: 19px; font-weight: 600; }
+.dp-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.dp-field-row { display: flex; gap: 12px; }
+.dp-field-row .dp-field { flex: 1; }
+.dp-field-label { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); }
+.dp-input, .dp-select { background: var(--surface-2); border: 1px solid var(--line); color: var(--text); border-radius: 9px; padding: 10px 12px; font-size: 14px; width: 100%; }
+.dp-textarea { min-height: 64px; resize: vertical; }
+.dp-input-date { color-scheme: dark; }
+.dp-time-picker { display: flex; gap: 6px; }
+.dp-time-picker .dp-select { flex: 1; padding: 9px 6px; text-align: center; }
+.dp-chip-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.dp-chip { --chip-color: #888; background: none; border: 1.5px solid var(--line); color: var(--text-muted); font-size: 12.5px; padding: 7px 13px; border-radius: 999px; cursor: pointer; }
+.dp-chip-active { border-color: var(--chip-color); color: var(--text); background: color-mix(in srgb, var(--chip-color) 18%, transparent); }
+.dp-form-actions { display: flex; gap: 10px; margin-top: 6px; }
+.dp-btn { flex: 1; border: none; border-radius: 10px; padding: 13px; font-size: 14px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; }
+.dp-btn-primary { background: var(--amber); color: #181208; }
+.dp-btn-danger { background: none; border: 1.5px solid var(--coral); color: var(--coral); flex: 0 0 auto; padding: 13px 16px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .dp-sheet, .dp-spinner { animation: none; }
+}
+`;
+
+/* ---------------------------------------------------------------- */
+/* small components                                                   */
+/* ---------------------------------------------------------------- */
+
+function TimePicker({ parts, onChange }) {
+  return (
+    <div className="dp-time-picker">
+      <select className="dp-select" value={parts.h} onChange={(e) => onChange({ ...parts, h: Number(e.target.value) })}>
+        {Array.from({ length: 12 }, (_, i) => i + 1).map((h) => (
+          <option key={h} value={h}>{h}</option>
+        ))}
+      </select>
+      <select className="dp-select" value={parts.m} onChange={(e) => onChange({ ...parts, m: Number(e.target.value) })}>
+        {[0, 15, 30, 45].map((m) => (
+          <option key={m} value={m}>{pad2(m)}</option>
+        ))}
+      </select>
+      <select className="dp-select" value={parts.period} onChange={(e) => onChange({ ...parts, period: e.target.value })}>
+        <option value="AM">AM</option>
+        <option value="PM">PM</option>
+      </select>
+    </div>
+  );
+}
+
+function EventForm({ form, mode, onSave, onDelete, onClose }) {
+  const [local, setLocal] = useState(form);
+  const startParts = minutesToParts(local.start);
+  const endParts = minutesToParts(local.end);
+
+  function setStartParts(p) {
+    const mins = partsToMinutes(p);
+    setLocal((prev) => ({ ...prev, start: mins, end: Math.max(mins + 15, prev.end) }));
+  }
+  function setEndParts(p) {
+    const mins = partsToMinutes(p);
+    setLocal((prev) => ({ ...prev, end: Math.max(mins, prev.start + 15) }));
+  }
+
+  return (
+    <div className="dp-form">
+      <div className="dp-form-header">
+        <h3>{mode === 'add' ? 'New block' : 'Edit block'}</h3>
+        <button type="button" className="dp-icon-btn" onClick={onClose} aria-label="Close"><X size={18} /></button>
+      </div>
+      <label className="dp-field">
+        <span className="dp-field-label">Title</span>
+        <input className="dp-input" value={local.title} onChange={(e) => setLocal({ ...local, title: e.target.value })} placeholder="What's happening?" autoFocus />
+      </label>
+      <div className="dp-field-row">
+        <div className="dp-field">
+          <span className="dp-field-label">Starts</span>
+          <TimePicker parts={startParts} onChange={setStartParts} />
+        </div>
+        <div className="dp-field">
+          <span className="dp-field-label">Ends</span>
+          <TimePicker parts={endParts} onChange={setEndParts} />
+        </div>
+      </div>
+      <div className="dp-field">
+        <span className="dp-field-label">Category</span>
+        <div className="dp-chip-row">
+          {CATEGORIES.map((c) => (
+            <button
+              type="button"
+              key={c.id}
+              className={`dp-chip ${local.category === c.id ? 'dp-chip-active' : ''}`}
+              style={{ '--chip-color': c.color }}
+              onClick={() => setLocal({ ...local, category: c.id })}
+            >
+              {c.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="dp-form-actions">
+        {mode === 'edit' && (
+          <button type="button" className="dp-btn dp-btn-danger" onClick={() => onDelete(local.id)}>
+            <Trash2 size={15} /> Delete
+          </button>
+        )}
+        <button type="button" className="dp-btn dp-btn-primary" onClick={() => onSave(local)}>Save block</button>
+      </div>
+    </div>
+  );
+}
+
+function TaskForm({ form, mode, onSave, onDelete, onClose }) {
+  const [local, setLocal] = useState(form);
+  return (
+    <div className="dp-form">
+      <div className="dp-form-header">
+        <h3>{mode === 'add' ? 'New task' : 'Edit task'}</h3>
+        <button type="button" className="dp-icon-btn" onClick={onClose} aria-label="Close"><X size={18} /></button>
+      </div>
+      <label className="dp-field">
+        <span className="dp-field-label">Title</span>
+        <input className="dp-input" value={local.title} onChange={(e) => setLocal({ ...local, title: e.target.value })} placeholder="What needs doing?" autoFocus />
+      </label>
+      <div className="dp-field">
+        <span className="dp-field-label">Priority</span>
+        <div className="dp-chip-row">
+          {PRIORITIES.map((p) => (
+            <button
+              type="button"
+              key={p.id}
+              className={`dp-chip ${local.priority === p.id ? 'dp-chip-active' : ''}`}
+              style={{ '--chip-color': p.color }}
+              onClick={() => setLocal({ ...local, priority: p.id })}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <label className="dp-field">
+        <span className="dp-field-label">Due date</span>
+        <input className="dp-input dp-input-date" type="date" value={local.dueDate || ''} onChange={(e) => setLocal({ ...local, dueDate: e.target.value })} />
+      </label>
+      <label className="dp-field">
+        <span className="dp-field-label">Notes</span>
+        <textarea className="dp-input dp-textarea" value={local.notes || ''} onChange={(e) => setLocal({ ...local, notes: e.target.value })} placeholder="Optional details" />
+      </label>
+      <div className="dp-form-actions">
+        {mode === 'edit' && (
+          <button type="button" className="dp-btn dp-btn-danger" onClick={() => onDelete(local.id)}>
+            <Trash2 size={15} /> Delete
+          </button>
+        )}
+        <button type="button" className="dp-btn dp-btn-primary" onClick={() => onSave(local)}>Save task</button>
+      </div>
+    </div>
+  );
+}
+
+function HabitForm({ form, onSave, onClose }) {
+  const [local, setLocal] = useState(form);
+  return (
+    <div className="dp-form">
+      <div className="dp-form-header">
+        <h3>New habit</h3>
+        <button type="button" className="dp-icon-btn" onClick={onClose} aria-label="Close"><X size={18} /></button>
+      </div>
+      <label className="dp-field">
+        <span className="dp-field-label">Habit name</span>
+        <input className="dp-input" value={local.name} onChange={(e) => setLocal({ ...local, name: e.target.value })} placeholder="e.g. Drink water, Read, Stretch" autoFocus />
+      </label>
+      <div className="dp-form-actions">
+        <button type="button" className="dp-btn dp-btn-primary" onClick={() => onSave(local)}>Add habit</button>
+      </div>
+    </div>
+  );
+}
+
+function TaskSection({ title, tasks, accent, onToggle, onOpen, dimmed }) {
+  if (tasks.length === 0) return null;
+  return (
+    <section className="dp-task-section">
+      <h3 className="dp-task-section-title" style={{ color: accent }}>{title}</h3>
+      <ul className="dp-task-list">
+        {tasks.map((t) => (
+          <li key={t.id} className={`dp-task-row ${dimmed ? 'dp-task-dimmed' : ''}`}>
+            <button type="button" className={`dp-task-check ${t.completed ? 'dp-task-check-done' : ''}`} onClick={() => onToggle(t.id)} aria-label="Toggle complete">
+              {t.completed && <Check size={13} />}
+            </button>
+            <button type="button" className="dp-task-body" onClick={() => onOpen(t)}>
+              <span className={`dp-task-title ${t.completed ? 'dp-task-title-done' : ''}`}>{t.title}</span>
+              <span className="dp-task-meta">
+                <span className="dp-priority-dot" style={{ background: (PRIORITIES.find((p) => p.id === t.priority) || {}).color }} />
+                {t.dueDate && <span className="dp-task-due">{formatDisplayDate(t.dueDate)}</span>}
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/* ---------------------------------------------------------------- */
+/* main component                                                     */
+/* ---------------------------------------------------------------- */
+
+export default function DayPlanner() {
+  const [data, setData] = useState(DEFAULT_DATA);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState('schedule');
+  const [selectedDateKey, setSelectedDateKey] = useState(todayKey());
+  const [clockMinutes, setClockMinutes] = useState(nowMinutes());
+  const [sheet, setSheet] = useState(null);
+  const gridRef = useRef(null);
+  const saveTimer = useRef(null);
+  const initialLoadDone = useRef(false);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const res = await window.storage.get(STORAGE_KEY, false);
+        if (mounted && res && res.value) {
+          const parsed = JSON.parse(res.value);
+          setData({ ...DEFAULT_DATA, ...parsed });
+        }
+      } catch (e) {
+        // no existing data yet, defaults stand
+      } finally {
+        if (mounted) {
+          initialLoadDone.current = true;
+          setLoading(false);
+        }
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!initialLoadDone.current) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      try {
+        await window.storage.set(STORAGE_KEY, JSON.stringify(data), false);
+      } catch (e) {
+        console.error('Failed to save planner data', e);
+      }
+    }, 500);
+    return () => clearTimeout(saveTimer.current);
+  }, [data]);
+
+  useEffect(() => {
+    const id = setInterval(() => setClockMinutes(nowMinutes()), 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  const dayEvents = useMemo(() => {
+    return data.events.filter((e) => e.date === selectedDateKey).sort((a, b) => a.start - b.start);
+  }, [data.events, selectedDateKey]);
+
+  const taskGroups = useMemo(() => {
+    const tKey = todayKey();
+    const groups = { overdue: [], today: [], upcoming: [], noDate: [], completed: [] };
+    const order = { high: 0, medium: 1, low: 2 };
+    const sorted = [...data.tasks].sort((a, b) => (order[a.priority] ?? 1) - (order[b.priority] ?? 1));
+    for (const t of sorted) {
+      if (t.completed) { groups.completed.push(t); continue; }
+      if (!t.dueDate) { groups.noDate.push(t); continue; }
+      if (t.dueDate < tKey) groups.overdue.push(t);
+      else if (t.dueDate === tKey) groups.today.push(t);
+      else groups.upcoming.push(t);
+    }
+    groups.completed.sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0));
+    return groups;
+  }, [data.tasks]);
+
+  function calcStreak(habitId) {
+    const map = data.habitChecks[habitId] || {};
+    let d = new Date();
+    if (!map[formatDateKey(d)]) d = addDays(d, -1);
+    let streak = 0;
+    while (map[formatDateKey(d)]) {
+      streak++;
+      d = addDays(d, -1);
+    }
+    return streak;
+  }
+
+  function last7Days() {
+    const days = [];
+    const t = new Date();
+    for (let i = 6; i >= 0; i--) days.push(addDays(t, -i));
+    return days;
+  }
+
+  function updateData(fn) { setData((prev) => fn(prev)); }
+
+  function openAddEvent(presetStart) {
+    const start = presetStart ?? 540;
+    setSheet({ kind: 'event', mode: 'add', form: { id: null, date: selectedDateKey, title: '', category: 'work', start, end: Math.min(start + 60, RANGE_END_MIN) } });
+  }
+  function openEditEvent(ev) { setSheet({ kind: 'event', mode: 'edit', form: { ...ev } }); }
+  function saveEventForm(form) {
+    if (!form.title.trim()) return;
+    updateData((prev) => {
+      const events = [...prev.events];
+      if (form.id) {
+        const idx = events.findIndex((e) => e.id === form.id);
+        if (idx >= 0) events[idx] = { ...form };
+      } else {
+        events.push({ ...form, id: genId() });
+      }
+      return { ...prev, events };
+    });
+    setSheet(null);
+  }
+  function deleteEvent(id) {
+    updateData((prev) => ({ ...prev, events: prev.events.filter((e) => e.id !== id) }));
+    setSheet(null);
+  }
+
+  function openAddTask() {
+    setSheet({ kind: 'task', mode: 'add', form: { id: null, title: '', priority: 'medium', dueDate: '', notes: '', completed: false } });
+  }
+  function openEditTask(t) { setSheet({ kind: 'task', mode: 'edit', form: { ...t } }); }
+  function saveTaskForm(form) {
+    if (!form.title.trim()) return;
+    updateData((prev) => {
+      const tasks = [...prev.tasks];
+      if (form.id) {
+        const idx = tasks.findIndex((t) => t.id === form.id);
+        if (idx >= 0) tasks[idx] = { ...form };
+      } else {
+        tasks.push({ ...form, id: genId() });
+      }
+      return { ...prev, tasks };
+    });
+    setSheet(null);
+  }
+  function deleteTask(id) {
+    updateData((prev) => ({ ...prev, tasks: prev.tasks.filter((t) => t.id !== id) }));
+    setSheet(null);
+  }
+  function toggleTaskComplete(id) {
+    updateData((prev) => ({
+      ...prev,
+      tasks: prev.tasks.map((t) => (t.id === id ? { ...t, completed: !t.completed, completedAt: !t.completed ? Date.now() : null } : t)),
+    }));
+  }
+
+  function openAddHabit() { setSheet({ kind: 'habit', mode: 'add', form: { id: null, name: '' } }); }
+  function saveHabitForm(form) {
+    if (!form.name.trim()) return;
+    updateData((prev) => ({ ...prev, habits: [...prev.habits, { ...form, id: genId() }] }));
+    setSheet(null);
+  }
+  function deleteHabit(id) {
+    updateData((prev) => {
+      const habits = prev.habits.filter((h) => h.id !== id);
+      const habitChecks = { ...prev.habitChecks };
+      delete habitChecks[id];
+      return { ...prev, habits, habitChecks };
+    });
+  }
+  function toggleHabitDay(habitId, dateKey) {
+    updateData((prev) => {
+      const habitChecks = { ...prev.habitChecks };
+      const map = { ...(habitChecks[habitId] || {}) };
+      map[dateKey] = !map[dateKey];
+      habitChecks[habitId] = map;
+      return { ...prev, habitChecks };
+    });
+  }
+
+  function resetAllData() {
+    if (window.confirm('This will permanently delete all events, tasks, and habits. Continue?')) {
+      setData(DEFAULT_DATA);
+    }
+  }
+
+  function handleGridClick(e) {
+    if (e.target.closest('.dp-event-block')) return;
+    const rect = gridRef.current.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    let abs = RANGE_START_MIN + y / PX_PER_MIN;
+    abs = Math.round(abs / 15) * 15;
+    abs = Math.max(RANGE_START_MIN, Math.min(abs, RANGE_END_MIN - 30));
+    openAddEvent(abs);
+  }
+
+  if (loading) {
+    return (
+      <div className="dp-root dp-loading">
+        <style>{CSS}</style>
+        <div className="dp-spinner" />
+      </div>
+    );
+  }
+
+  const showNowLine = isToday(selectedDateKey) && clockMinutes >= RANGE_START_MIN && clockMinutes <= RANGE_END_MIN;
+
+  return (
+    <div className="dp-root">
+      <style>{CSS}</style>
+
+      <header className="dp-header">
+        <div className="dp-header-top">
+          <span className="dp-wordmark">DAY LOG</span>
+          <span className="dp-clock">{minutesToLabel(clockMinutes)}</span>
+        </div>
+        <div className="dp-date-nav">
+          <button type="button" className="dp-icon-btn" onClick={() => setSelectedDateKey(formatDateKey(addDays(parseDateKey(selectedDateKey), -1)))} aria-label="Previous day">
+            <ChevronLeft size={20} />
+          </button>
+          <div className="dp-date-display">
+            <span className="dp-date-main">{formatDisplayDate(selectedDateKey)}</span>
+            <span className="dp-date-year">{formatYear(selectedDateKey)}</span>
+          </div>
+          <button type="button" className="dp-icon-btn" onClick={() => setSelectedDateKey(formatDateKey(addDays(parseDateKey(selectedDateKey), 1)))} aria-label="Next day">
+            <ChevronRight size={20} />
+          </button>
+        </div>
+        {!isToday(selectedDateKey) && (
+          <button type="button" className="dp-today-pill" onClick={() => setSelectedDateKey(todayKey())}>Jump to today</button>
+        )}
+      </header>
+
+      <nav className="dp-tabs">
+        <button type="button" className={`dp-tab ${view === 'schedule' ? 'dp-tab-active' : ''}`} onClick={() => setView('schedule')}>
+          <CalendarDays size={16} /> Schedule
+        </button>
+        <button type="button" className={`dp-tab ${view === 'tasks' ? 'dp-tab-active' : ''}`} onClick={() => setView('tasks')}>
+          <ListChecks size={16} /> Tasks
+        </button>
+        <button type="button" className={`dp-tab ${view === 'habits' ? 'dp-tab-active' : ''}`} onClick={() => setView('habits')}>
+          <Flame size={16} /> Habits
+        </button>
+      </nav>
+
+      <main className="dp-content">
+        {view === 'schedule' && (
+          <div className="dp-schedule">
+            {dayEvents.length === 0 && (
+              <p className="dp-empty-hint">Nothing logged for this day. Tap anywhere on the timeline to add a block.</p>
+            )}
+            <div className="dp-grid-wrap">
+              <div className="dp-hour-gutter">
+                {HOURS.map((h) => (
+                  <div key={h} className="dp-hour-label" style={{ top: (h * 60 - RANGE_START_MIN) * PX_PER_MIN }}>
+                    {hour12Label(h)}
+                  </div>
+                ))}
+              </div>
+              <div className="dp-grid" ref={gridRef} style={{ height: GRID_HEIGHT }} onClick={handleGridClick}>
+                {HOURS.map((h) => (
+                  <div key={h} className="dp-hour-line" style={{ top: (h * 60 - RANGE_START_MIN) * PX_PER_MIN }} />
+                ))}
+                {showNowLine && (
+                  <div className="dp-now-line" style={{ top: (clockMinutes - RANGE_START_MIN) * PX_PER_MIN }}>
+                    <span className="dp-now-dot" />
+                    <span className="dp-now-time">{minutesToLabel(clockMinutes)}</span>
+                  </div>
+                )}
+                {dayEvents.map((ev) => {
+                  const cat = CATEGORIES.find((c) => c.id === ev.category) || CATEGORIES[3];
+                  const top = (ev.start - RANGE_START_MIN) * PX_PER_MIN;
+                  const height = Math.max((ev.end - ev.start) * PX_PER_MIN, 28);
+                  return (
+                    <button
+                      type="button"
+                      key={ev.id}
+                      className="dp-event-block"
+                      style={{ top, height, borderLeftColor: cat.color, background: `${cat.color}26` }}
+                      onClick={(e) => { e.stopPropagation(); openEditEvent(ev); }}
+                    >
+                      <span className="dp-event-title">{ev.title}</span>
+                      <span className="dp-event-time">{minutesToLabel(ev.start)} – {minutesToLabel(ev.end)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {view === 'tasks' && (
+          <div className="dp-tasks">
+            <TaskSection title="Overdue" tasks={taskGroups.overdue} accent="#D9695A" onToggle={toggleTaskComplete} onOpen={openEditTask} />
+            <TaskSection title="Today" tasks={taskGroups.today} accent="#E8A33D" onToggle={toggleTaskComplete} onOpen={openEditTask} />
+            <TaskSection title="Upcoming" tasks={taskGroups.upcoming} accent="#6B8CAE" onToggle={toggleTaskComplete} onOpen={openEditTask} />
+            <TaskSection title="No due date" tasks={taskGroups.noDate} accent="#7A8290" onToggle={toggleTaskComplete} onOpen={openEditTask} />
+            {taskGroups.completed.length > 0 && (
+              <TaskSection title="Completed" tasks={taskGroups.completed} accent="#5EA89A" onToggle={toggleTaskComplete} onOpen={openEditTask} dimmed />
+            )}
+            {data.tasks.length === 0 && <p className="dp-empty-hint">No tasks yet. Add one to get started.</p>}
+          </div>
+        )}
+
+        {view === 'habits' && (
+          <div className="dp-habits">
+            {data.habits.length === 0 && <p className="dp-empty-hint">No habits tracked yet. Add one to start building streaks.</p>}
+            {data.habits.map((h) => {
+              const streak = calcStreak(h.id);
+              return (
+                <div key={h.id} className="dp-habit-card">
+                  <div className="dp-habit-head">
+                    <div className="dp-habit-name-wrap">
+                      <span className="dp-habit-name">{h.name}</span>
+                      <span className="dp-habit-streak"><Flame size={14} /> {streak} day{streak === 1 ? '' : 's'}</span>
+                    </div>
+                    <button type="button" className="dp-icon-btn dp-habit-delete" onClick={() => deleteHabit(h.id)} aria-label={`Delete ${h.name}`}>
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                  <div className="dp-habit-grid">
+                    {last7Days().map((d) => {
+                      const key = formatDateKey(d);
+                      const checked = !!(data.habitChecks[h.id] && data.habitChecks[h.id][key]);
+                      const today = isToday(key);
+                      return (
+                        <button
+                          type="button"
+                          key={key}
+                          className={`dp-habit-day ${checked ? 'dp-habit-day-checked' : ''} ${today ? 'dp-habit-day-today' : ''}`}
+                          onClick={() => toggleHabitDay(h.id, key)}
+                          aria-label={`${h.name} on ${key}`}
+                        >
+                          {checked ? <Check size={13} /> : null}
+                          <span className="dp-habit-day-letter">{WEEKDAY_LETTERS[d.getDay()]}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+            <button type="button" className="dp-reset-link" onClick={resetAllData}>Reset all planner data</button>
+          </div>
+        )}
+      </main>
+
+      <button
+        type="button"
+        className="dp-fab"
+        onClick={() => {
+          if (view === 'schedule') openAddEvent();
+          else if (view === 'tasks') openAddTask();
+          else openAddHabit();
+        }}
+        aria-label="Add"
+      >
+        <Plus size={24} />
+      </button>
+
+      {sheet && (
+        <div className="dp-sheet-backdrop" onClick={() => setSheet(null)}>
+          <div className="dp-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="dp-sheet-handle" />
+            {sheet.kind === 'event' && (
+              <EventForm form={sheet.form} mode={sheet.mode} onSave={saveEventForm} onDelete={deleteEvent} onClose={() => setSheet(null)} />
+            )}
+            {sheet.kind === 'task' && (
+              <TaskForm form={sheet.form} mode={sheet.mode} onSave={saveTaskForm} onDelete={deleteTask} onClose={() => setSheet(null)} />
+            )}
+            {sheet.kind === 'habit' && (
+              <HabitForm form={sheet.form} onSave={saveHabitForm} onClose={() => setSheet(null)} />
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
